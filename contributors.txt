@@ -1,0 +1,5 @@
+Principle Investigator and original software design
+	Raymond Atta-Fynn <attafynn@uta.edu>
+	
+C++ Conversion
+	Garrett Brown <garrettrbrown@mavs.uta.edu>
