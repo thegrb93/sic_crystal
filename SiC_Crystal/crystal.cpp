@@ -1,4 +1,5 @@
 #include "crystal.h"
+#include <flann/flann.hpp>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -221,7 +222,7 @@ void Crystal_SiC::calc3BodyEnergyForces()
 								Eigen::Vector3d dVdk = P*SiCThreeBodydRdX(m_threebody_constants, rik, R, vik) +
 									R_dpdx*SiCThreeBodydCosdX(rik, rij, costheta, vik, vij);
 
-#									pragma omp critical
+#								pragma omp critical
 								{
 									particle_i.analytical_force += (dVdj + dVdk);
 									particle_j.analytical_force -= dVdj;
@@ -271,6 +272,52 @@ void Crystal_SiC::calc3BodyEnergyForces()
 			}
 		}
 	}
+}
+
+const double ringThresholds[3] = {
+	2.7 * 2.7, // Si - Si
+	2.4 * 2.4, // Si - C
+	1.9 * 1.9, // C - C
+};
+void Crystal_SiC::findRings()
+{
+	flann::Matrix<double> positions(new double[m_particles.size() * 3], m_particles.size(), 3);
+	flann::Matrix<int> indices(new int[m_particles.size()], 1, m_particles.size());
+	flann::Matrix<double> dists(new double[m_particles.size()], 1, m_particles.size());
+
+#	pragma omp parallel for
+	for (int i = 0; i < m_particles.size(); ++i)
+	{
+		memcpy(positions[i], m_particles[i].position.data(), sizeof(double) * 3);
+	}
+	flann::KDTreeSingleIndex<flann::L2<double>> index(positions, flann::KDTreeSingleIndexParams());
+	index.buildIndex();
+
+	std::vector<std::vector<int>> closest_particles(m_particles.size());
+#	pragma omp parallel for
+	for (int i = 0; i < m_particles.size(); ++i)
+	{
+		Element_Atom& particle_i = m_particles[i];
+		flann::Matrix<double> position(particle_i.position.data(), 1, 3);
+		int count = index.radiusSearch(position, indices, dists, ringThresholds[0], flann::SearchParams(-1));
+
+		closest_particles[i].reserve(count);
+		for (int j = 0; j < count; ++j)
+		{
+			Element_Atom& particle_j = m_particles[j];
+			if (dists[0][j] <= ringThresholds[particle_i.type + particle_j.type])
+			{
+#				pragma omp critical
+				{
+					closest_particles[i].push_back(indices[0][j]);
+				}
+			}
+		}
+	}
+
+	delete[] positions.ptr();
+	delete[] indices.ptr();
+	delete[] dists.ptr();
 }
 
 void Crystal_SiC::randomizeVelocity(double temp)
