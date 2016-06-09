@@ -324,8 +324,8 @@ void Crystal_SiC::randomizeVelocity(double temp)
 {
 	std::random_device rd;
 	std::mt19937 gen(rd());
-	std::uniform_real_distribution<double> rand_r(std::numeric_limits<double>::denorm_min(), 1);
-	std::uniform_real_distribution<double> rand_theta(0, std::acos(-1)*2);
+	std::uniform_real<double> rand_r(std::numeric_limits<double>::denorm_min(), 1);
+	std::uniform_real<double> rand_theta(0, std::acos(-1)*2);
 
 	double prefactors[2] = 
 	{
