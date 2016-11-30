@@ -1,5 +1,5 @@
 #include "crystal.h"
-#include <flann/flann.hpp>
+//#include <flann/flann.hpp>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -274,7 +274,7 @@ void Crystal_SiC::calc3BodyEnergyForces()
 	}
 }
 
-const double ringThresholds[3] = {
+/*const double ringThresholds[3] = {
 	2.7 * 2.7, // Si - Si
 	2.4 * 2.4, // Si - C
 	1.9 * 1.9, // C - C
@@ -318,6 +318,58 @@ void Crystal_SiC::findRings()
 	delete[] positions.ptr();
 	delete[] indices.ptr();
 	delete[] dists.ptr();
+}*/
+
+void Crystal_SiC::calcPhonons()
+{
+	for (int i = 0; i < m_particles.size(); ++i)
+	{
+		Element_Atom& particle_i = m_particles[i];
+
+#		pragma omp parallel for
+		for (int j = 0; j < m_particles.size(); ++j)
+		{
+			Element_Atom& particle_j = m_particles[j];
+
+			Eigen::Vector3d distance = (particle_j.position - particle_i.position);
+			typedef double(*RoundType)(double);
+			distance -= (distance / m_length).unaryExpr((RoundType)round) * m_length;
+			double length = distance.norm();
+
+			if (length <= r_c)
+			{
+				Eigen::Vector3d distance_norm = distance / length;
+				const PotentialParameters_TwoBody& param = m_twobody_constants[particle_i.type + particle_j.type];
+
+				Eigen::Vector3d analytical_force = distance_norm * SiCTwoBodydVdRShifted(param, length);
+
+				particle_i.distances[j] = distance;
+				particle_j.distances[i] = -distance;
+				particle_i.distance_lengths[j] = length;
+				particle_j.distance_lengths[i] = length;
+
+#				pragma omp critical
+				{
+					particle_i.analytical_force += analytical_force;
+					particle_j.analytical_force -= analytical_force;
+				}
+
+#					ifdef CalculateNumericalForce
+				Eigen::Vector3d numerical_force = distance_norm * ((SiCTwoBodyPotentialShifted(param, length + perterb) -
+					SiCTwoBodyPotentialShifted(param, length - perterb)) / 2.0 / perterb);
+				particle_i.numeric_force += numerical_force;
+				particle_j.numeric_force -= numerical_force;
+				total_energy += SiCTwoBodyPotentialShifted(param, length);
+#					endif
+
+			}
+			else
+			{
+				particle_i.distance_lengths[j] = std::numeric_limits<double>::max();
+				particle_j.distance_lengths[i] = std::numeric_limits<double>::max();
+			}
+		}
+	}
 }
 
 void Crystal_SiC::randomizeVelocity(double temp)

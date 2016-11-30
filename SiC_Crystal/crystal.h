@@ -65,6 +65,7 @@ struct Crystal_SiC
 	Crystal_SiC();
 	void calc2BodyEnergyForces();
 	void calc3BodyEnergyForces();
+	void calcPhonons();
 	void findRings();
 	void randomizeVelocity(double temp);
 	void regulateTemperature(double temp);
