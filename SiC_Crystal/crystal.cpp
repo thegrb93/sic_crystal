@@ -71,6 +71,20 @@ inline Eigen::Vector3d SiCThreeBodydCosdX(double r_ij, double r_ik, double costh
 	return (v_ik / (r_ij*r_ik) - v_ij*(costheta / std::pow(r_ij, 2)));
 }
 
+inline void SiCThreeBodyForce(const PotentialParameters_ThreeBody& param, const Eigen::Vector3d& vij, const Eigen::Vector3d& vik, double rij, double rik, Eigen::Vector3d& dVdj, Eigen::Vector3d& dVdk)
+{
+	double costheta = vij.dot(vik) / rij / rik;
+	double R = SiCThreeBodyPotentialR(param, rij, rik);
+	double P = SiCThreeBodyPotentialP(param, rij, rik, costheta);
+	double R_dpdx = R*SiCThreeBodydPdX(param, costheta);
+
+	dVdj = P*SiCThreeBodydRdX(param, rij, R, vij) +
+		R_dpdx*SiCThreeBodydCosdX(rij, rik, costheta, vij, vik);
+
+	dVdk = P*SiCThreeBodydRdX(param, rik, R, vik) +
+		R_dpdx*SiCThreeBodydCosdX(rik, rij, costheta, vik, vij);
+}
+
 
 Crystal_SiC::Crystal_SiC()
 {
@@ -211,16 +225,8 @@ void Crystal_SiC::calc3BodyEnergyForces()
 							double rik = particle_i.distance_lengths[k];
 							if (rik <= r_0)
 							{
-								double costheta = particle_i.distances[j].dot(particle_i.distances[k]) / rij / rik;
-								double R = SiCThreeBodyPotentialR(m_threebody_constants, rij, rik);
-								double P = SiCThreeBodyPotentialP(m_threebody_constants, rij, rik, costheta);
-								double R_dpdx = R*SiCThreeBodydPdX(m_threebody_constants, costheta);
-
-								Eigen::Vector3d dVdj = P*SiCThreeBodydRdX(m_threebody_constants, rij, R, vij) +
-									R_dpdx*SiCThreeBodydCosdX(rij, rik, costheta, vij, vik);
-
-								Eigen::Vector3d dVdk = P*SiCThreeBodydRdX(m_threebody_constants, rik, R, vik) +
-									R_dpdx*SiCThreeBodydCosdX(rik, rij, costheta, vik, vij);
+								Eigen::Vector3d dVdj, dVdk;
+								SiCThreeBodyForce(m_threebody_constants, vij, vik, rij, rik, dVdj, dVdk);
 
 #								pragma omp critical
 								{
@@ -322,12 +328,14 @@ void Crystal_SiC::findRings()
 
 void Crystal_SiC::calcPhonons()
 {
+	Eigen::MatrixXd hessian(m_particles.size(), m_particles.size());
+
+	//Calculate distances
 	for (int i = 0; i < m_particles.size(); ++i)
 	{
 		Element_Atom& particle_i = m_particles[i];
-
 #		pragma omp parallel for
-		for (int j = 0; j < m_particles.size(); ++j)
+		for (int j = i + 1; j < m_particles.size(); ++j)
 		{
 			Element_Atom& particle_j = m_particles[j];
 
@@ -338,35 +346,127 @@ void Crystal_SiC::calcPhonons()
 
 			if (length <= r_c)
 			{
-				Eigen::Vector3d distance_norm = distance / length;
-				const PotentialParameters_TwoBody& param = m_twobody_constants[particle_i.type + particle_j.type];
-
-				Eigen::Vector3d analytical_force = distance_norm * SiCTwoBodydVdRShifted(param, length);
-
 				particle_i.distances[j] = distance;
 				particle_j.distances[i] = -distance;
 				particle_i.distance_lengths[j] = length;
 				particle_j.distance_lengths[i] = length;
-
-#				pragma omp critical
-				{
-					particle_i.analytical_force += analytical_force;
-					particle_j.analytical_force -= analytical_force;
-				}
-
-#					ifdef CalculateNumericalForce
-				Eigen::Vector3d numerical_force = distance_norm * ((SiCTwoBodyPotentialShifted(param, length + perterb) -
-					SiCTwoBodyPotentialShifted(param, length - perterb)) / 2.0 / perterb);
-				particle_i.numeric_force += numerical_force;
-				particle_j.numeric_force -= numerical_force;
-				total_energy += SiCTwoBodyPotentialShifted(param, length);
-#					endif
-
 			}
 			else
 			{
 				particle_i.distance_lengths[j] = std::numeric_limits<double>::max();
 				particle_j.distance_lengths[i] = std::numeric_limits<double>::max();
+			}
+		}
+	}
+	for (int i = 0; i < m_particles.size(); ++i)
+	{
+		Element_Atom& particle_i = m_particles[i];
+#		pragma omp parallel for
+		for (int j = 0; j < m_particles.size(); ++j)
+		{
+			Element_Atom& particle_j = m_particles[j];
+			if (i != j)
+			{
+				Eigen::Vector3d& vij = particle_i.distances[j];
+				double rij = particle_i.distance_lengths[j];
+
+				//2Body Delta Force
+				if (rij <= r_c)
+				{
+					Eigen::Vector3d distance_norm = vij / rij;
+					const PotentialParameters_TwoBody& param = m_twobody_constants[particle_i.type + particle_j.type];
+
+
+					Eigen::Vector3d numerical_deltaforce = distance_norm * ((SiCTwoBodydVdRShifted(param, rij + perterb) -
+						SiCTwoBodydVdRShifted(param, rij - perterb)) / 2.0 / perterb);
+
+#					pragma omp critical
+					{
+						particle_i.analytical_force += analytical_force;
+						particle_j.analytical_force -= analytical_force;
+					}
+				}
+				//3Body Delta Force
+				if (particle_i.type != particle_j.type)
+				{
+					if (rij <= r_0)
+					{
+						for (int k = j + 1; k < m_particles.size(); ++k)
+						{
+							Element_Atom& particle_k = m_particles[k];
+							if (i != k && particle_i.type != particle_k.type)
+							{
+								Eigen::Vector3d& vik = particle_i.distances[k];
+								double rik = particle_i.distance_lengths[k];
+								if (rik <= r_0)
+								{
+									double R = SiCThreeBodyPotentialR(m_threebody_constants, rij, rik);
+									double P = SiCThreeBodyPotentialP(m_threebody_constants, rij, rik, costheta);
+									double R_dpdx = R*SiCThreeBodydPdX(m_threebody_constants, costheta);
+
+									Eigen::Vector3d dVdj = P*SiCThreeBodydRdX(m_threebody_constants, rij, R, vij) +
+										R_dpdx*SiCThreeBodydCosdX(rij, rik, costheta, vij, vik);
+
+									Eigen::Vector3d dVdk = P*SiCThreeBodydRdX(m_threebody_constants, rik, R, vik) +
+										R_dpdx*SiCThreeBodydCosdX(rik, rij, costheta, vik, vij);
+
+#									pragma omp critical
+									{
+										particle_i.analytical_force += (dVdj + dVdk);
+										particle_j.analytical_force -= dVdj;
+										particle_k.analytical_force -= dVdk;
+									}
+
+									Eigen::Vector3d numeric_force_ij(0, 0, 0);
+									Eigen::Vector3d numeric_force_ik(0, 0, 0);
+									for (int l = 0; l < 3; ++l)
+									{
+										Eigen::Vector3d v_perterb(0, 0, 0);
+										v_perterb(l) = perterb;
+
+										Eigen::Vector3d v_ij_p_1 = vij - v_perterb;
+										Eigen::Vector3d v_ij_p_2 = vij + v_perterb;
+
+										Eigen::Vector3d v_ik_p_1 = vik - v_perterb;
+										Eigen::Vector3d v_ik_p_2 = vik + v_perterb;
+
+										Eigen::Vector3d dVdjp1, dVdjp2, dVdkp1, dVdkp2;
+
+										SiCThreeBodyForce(m_threebody_constants, v_ij_p_1, v_ik_p_1, v_ij_p_1.norm(), v_ik_p_1.norm(), dVdjp1, dVdkp1);
+										SiCThreeBodyForce(m_threebody_constants, v_ij_p_2, v_ik_p_2, v_ij_p_2.norm(), v_ik_p_2.norm(), dVdjp2, dVdkp2);
+
+										
+										Eigen::Vector3d v_ij_p_1 = vij - v_perterb;
+										Eigen::Vector3d v_ij_p_2 = vij + v_perterb;
+										double pij1 = v_ij_p_1.norm();
+										double pij2 = v_ij_p_2.norm();
+										double costhetaij1 = v_ij_p_1.dot(vik) / pij1 / rik;
+										double costhetaij2 = v_ij_p_2.dot(vik) / pij2 / rik;
+
+										numeric_force_ij(l) = (SiCThreeBodyPotential(m_threebody_constants, pij1, rik, costhetaij1) -
+											SiCThreeBodyPotential(m_threebody_constants, pij2, rik, costhetaij2)) / 2 / perterb;
+
+
+										Eigen::Vector3d v_ik_p_1 = vik - v_perterb;
+										Eigen::Vector3d v_ik_p_2 = vik + v_perterb;
+										double pik1 = v_ik_p_1.norm();
+										double pik2 = v_ik_p_2.norm();
+										double costhetaik1 = v_ik_p_1.dot(vij) / pik1 / rij;
+										double costhetaik2 = v_ik_p_2.dot(vij) / pik2 / rij;
+
+										numeric_force_ik(l) = (SiCThreeBodyPotential(m_threebody_constants, rij, pik1, costhetaik1) -
+											SiCThreeBodyPotential(m_threebody_constants, rij, pik2, costhetaik2)) / 2 / perterb;
+
+									}
+
+									particle_i.numeric_force -= (numeric_force_ij + numeric_force_ik);
+									particle_j.numeric_force += numeric_force_ij;
+									particle_k.numeric_force += numeric_force_ik;
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 	}
